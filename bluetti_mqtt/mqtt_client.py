@@ -4,6 +4,7 @@ from enum import auto, Enum, unique
 import json
 import logging
 import re
+import time
 from typing import List, Optional
 from asyncio_mqtt import Client, MqttError
 from paho.mqtt.client import MQTTMessage
@@ -439,6 +440,8 @@ class MQTTClient:
         self.username = username
         self.password = password
         self.home_assistant_mode = home_assistant_mode
+        self.last_values = {}
+        self.reset_time = time.monotonic()
 
     async def run(self):
         while True:
@@ -610,7 +613,9 @@ class MQTTClient:
             else:
                 assert False, f'Unhandled field type: {field.type.name}'
 
-            await client.publish(topic_prefix + name, payload=payload.encode())
+            topic_key = topic_prefix + name
+            payload_val = payload.encode() 
+            await self._mqtt_publish(client, topic_key, payload_val)
 
         # Publish battery pack data
         if 'pack_battery_percent' in msg.parsed:
@@ -618,27 +623,49 @@ class MQTTClient:
                 'percent': msg.parsed['pack_battery_percent'],
                 'voltages': [float(d) for d in msg.parsed['cell_voltages']],
             }
-            await client.publish(
+            await self._mqtt_publish(
+                client,
                 topic_prefix + f'pack_details{msg.parsed["pack_num"]}',
                 payload=json.dumps(pack_details, separators=(',', ':')).encode()
             )
 
         # Publish DC input data
         if 'internal_dc_input_voltage' in msg.parsed:
-            await client.publish(
+            await self._mqtt_publish(
+                client,
                 topic_prefix + 'dc_input_voltage1',
                 payload=str(msg.parsed['internal_dc_input_voltage']).encode()
             )
         if 'internal_dc_input_power' in msg.parsed:
-            await client.publish(
+            await self._mqtt_publish(
+                client,
                 topic_prefix + 'dc_input_power1',
                 payload=str(msg.parsed['internal_dc_input_power']).encode()
             )
         if 'internal_dc_input_current' in msg.parsed:
-            await client.publish(
+            await self._mqtt_publish(
+                client,
                 topic_prefix + 'dc_input_current1',
                 payload=str(msg.parsed['internal_dc_input_current']).encode()
             )
+
+    async def _mqtt_publish(self, client: Client, topic: str, payload:str):
+        # Check if the message was already sent and cache the message
+        # Resend eveything every 10 seconds
+        current_time = time.monotonic()
+        if current_time - self.reset_time >= 10:
+            self.reset_time = time.monotonic()
+            self.last_values.clear()
+
+        if self.last_values.get(topic) != payload: 
+            await client.publish(
+                topic, 
+                payload=payload
+            )
+            logging.debug( f'{self.reset_time} - sent {topic} with payload: {payload}')
+
+        self.last_values.update({topic : payload})
+        return 
 
     def _battery_pack_fields(self, pack: int):
         return [
